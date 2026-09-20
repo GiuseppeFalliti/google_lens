@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
 import statistics
 import threading
 import time
 from collections.abc import Callable
+
+from wordfreq import zipf_frequency
 
 from src.capture.screen_capture import ScreenCapture
 from src.exceptions import NoTextDetectedError, OCRError, OperationCancelled
@@ -17,6 +20,16 @@ from src.utils.image_utils import OCRImageVariant, build_ocr_variants
 
 
 StatusCallback = Callable[[str], None]
+
+_WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)?", re.UNICODE)
+_WORDFREQ_LANG_MAP = {
+    "en": "en",
+    "it": "it",
+    "fr": "fr",
+    "de": "de",
+    "es": "es",
+    "pt": "pt",
+}
 
 
 @dataclass(slots=True)
@@ -56,26 +69,60 @@ class TranslationPipeline:
 
     @staticmethod
     def build_translation_text(ocr_result: OCRResult) -> str:
-        """Build natural text for the translator from OCR line/block output."""
         block_texts = [
             " ".join(block.text.split())
             for block in ocr_result.blocks
             if block.text and block.text.strip()
         ]
-
         if block_texts:
             return " ".join(block_texts).strip()
-
         return " ".join(ocr_result.full_text.split()).strip()
 
     @staticmethod
-    def score_ocr_result(ocr_result: OCRResult) -> float:
-        """Score an OCR candidate using confidence plus useful text coverage.
+    def lexical_quality(text: str, language: str) -> float:
+        """Estimate whether recognized tokens look like real words.
 
-        Confidence remains the dominant factor, while a modest coverage bonus
-        prevents a very short, high-confidence fragment from beating a more
-        complete reading of the selected sentence.
+        This is not used to rewrite OCR output. It only helps choose between
+        competing OCR readings, e.g. preferring ABSENCE over ABSne when their
+        visual confidence is otherwise similar.
         """
+        lang = _WORDFREQ_LANG_MAP.get(language.lower())
+        if lang is None:
+            return 0.5
+
+        words = _WORD_RE.findall(text)
+        words = [word for word in words if len(word) > 1]
+        if not words:
+            return 0.0
+
+        scores: list[float] = []
+        for word in words:
+            frequency = zipf_frequency(word.casefold(), lang)
+            # Typical real words are mostly in Zipf 2-7. Normalize that useful
+            # range while still allowing uncommon game/dialogue vocabulary.
+            scores.append(max(0.0, min(1.0, (frequency - 1.0) / 5.0)))
+
+        return sum(scores) / len(scores)
+
+    @staticmethod
+    def suspicious_case_penalty(text: str) -> float:
+        penalty = 0.0
+        words = _WORD_RE.findall(text)
+        for word in words:
+            if len(word) < 4:
+                continue
+            if word.islower() or word.isupper() or word.istitle():
+                continue
+            # OCR artifacts often create tokens such as ABSne / SUPPosED.
+            penalty += 0.025
+        return min(0.10, penalty)
+
+    @classmethod
+    def score_ocr_result(
+        cls,
+        ocr_result: OCRResult,
+        source_language: str = "en",
+    ) -> float:
         if ocr_result.is_empty or not ocr_result.blocks:
             return -1.0
 
@@ -88,19 +135,22 @@ class TranslationPipeline:
 
         normalized_text = " ".join(ocr_result.full_text.split())
         alphanumeric_chars = sum(character.isalnum() for character in normalized_text)
-        coverage = min(1.0, alphanumeric_chars / 80.0)
+        coverage = min(1.0, alphanumeric_chars / 90.0)
         block_coverage = min(1.0, len(ocr_result.blocks) / 5.0)
+        lexical = cls.lexical_quality(normalized_text, source_language)
+        case_penalty = cls.suspicious_case_penalty(normalized_text)
 
         return (
-            average_confidence * 0.60
-            + median_confidence * 0.25
-            + coverage * 0.10
+            average_confidence * 0.42
+            + median_confidence * 0.18
+            + coverage * 0.16
+            + lexical * 0.19
             + block_coverage * 0.05
+            - case_penalty
         )
 
     @staticmethod
     def rescale_ocr_result(ocr_result: OCRResult, scale: float) -> OCRResult:
-        """Map OCR boxes from an upscaled variant back to the selected region."""
         if scale == 1.0:
             return ocr_result
 
@@ -120,6 +170,7 @@ class TranslationPipeline:
     def _recognize_best_variant(
         self,
         variants: list[OCRImageVariant],
+        source_language: str,
         status_callback: StatusCallback | None = None,
     ) -> OCRResult:
         best_result: OCRResult | None = None
@@ -145,11 +196,13 @@ class TranslationPipeline:
                 )
                 continue
 
-            score = self.score_ocr_result(result)
-            self._logger.debug(
-                "OCR candidate variant=%s score=%.4f blocks=%d text=%r",
+            score = self.score_ocr_result(result, source_language)
+            lexical = self.lexical_quality(result.full_text, source_language)
+            self._logger.info(
+                "OCR candidate variant=%s score=%.4f lexical=%.4f blocks=%d text=%r",
                 variant.name,
                 score,
+                lexical,
                 len(result.blocks),
                 result.full_text,
             )
@@ -165,9 +218,10 @@ class TranslationPipeline:
             return OCRResult(blocks=[], full_text="")
 
         self._logger.info(
-            "Selected OCR variant=%s score=%.4f",
+            "Selected OCR variant=%s score=%.4f text=%r",
             best_variant,
             best_score,
+            best_result.full_text,
         )
         return best_result
 
@@ -199,6 +253,7 @@ class TranslationPipeline:
         try:
             ocr_result = self._recognize_best_variant(
                 variants,
+                source_language=source_language,
                 status_callback=status_callback,
             )
         finally:
@@ -215,8 +270,7 @@ class TranslationPipeline:
         if not translation_text:
             raise NoTextDetectedError("No usable text detected in the selected area.")
 
-        self._logger.debug("OCR raw text: %r", ocr_result.full_text)
-        self._logger.debug("OCR normalized text: %r", translation_text)
+        self._logger.info("OCR normalized text: %r", translation_text)
 
         if status_callback:
             status_callback("Translating...")
@@ -229,6 +283,8 @@ class TranslationPipeline:
             provider_name=provider_name,
         )
         translation_seconds = time.perf_counter() - started
+
+        self._logger.info("Translation output: %r", translated)
 
         self._check_cancelled()
         return TranslationResult(

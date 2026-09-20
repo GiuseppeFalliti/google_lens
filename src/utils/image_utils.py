@@ -19,6 +19,7 @@ def preprocess_for_ocr(
     contrast: float = 1.0,
     upscale: float = 1.0,
     sharpness: float = 1.0,
+    autocontrast: bool = False,
 ) -> Image.Image:
     """Return an in-memory image prepared for OCR."""
     processed = image.convert("RGB")
@@ -31,6 +32,9 @@ def preprocess_for_ocr(
     if grayscale:
         processed = ImageOps.grayscale(processed).convert("RGB")
 
+    if autocontrast:
+        processed = ImageOps.autocontrast(processed)
+
     if contrast != 1.0:
         processed = ImageEnhance.Contrast(processed).enhance(contrast)
 
@@ -41,13 +45,7 @@ def preprocess_for_ocr(
 
 
 def build_ocr_variants(image: Image.Image) -> list[OCRImageVariant]:
-    """Create complementary OCR inputs for small/stylized on-screen text.
-
-    The original image is retained because enhancement is not universally
-    beneficial. The other variants target the common failure modes found in
-    games/comics: small glyphs, low contrast, anti-aliasing and textured
-    backgrounds.
-    """
+    """Create complementary OCR inputs for small/stylized on-screen text."""
     return [
         OCRImageVariant(
             name="original",
@@ -68,11 +66,23 @@ def build_ocr_variants(image: Image.Image) -> list[OCRImageVariant]:
             name="upscale_grayscale",
             image=preprocess_for_ocr(
                 image,
-                upscale=2.0,
+                upscale=2.5,
                 grayscale=True,
-                contrast=1.60,
-                sharpness=1.40,
+                contrast=1.55,
+                sharpness=1.45,
             ),
-            scale=2.0,
+            scale=2.5,
+        ),
+        OCRImageVariant(
+            name="autocontrast_3x",
+            image=preprocess_for_ocr(
+                image,
+                upscale=3.0,
+                grayscale=True,
+                autocontrast=True,
+                contrast=1.20,
+                sharpness=1.65,
+            ),
+            scale=3.0,
         ),
     ]

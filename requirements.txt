@@ -6,3 +6,4 @@ paddleocr==2.10.0
 argostranslate==1.11.0
 httpx
 python-dotenv
+wordfreq>=3.1
