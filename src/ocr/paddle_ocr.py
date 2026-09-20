@@ -128,14 +128,16 @@ class PaddleOCREngine(OCREngine):
             if "res" in data and isinstance(data["res"], Mapping):
                 data = data["res"]
 
-            texts = data.get("rec_texts") or data.get("texts") or []
-            scores = data.get("rec_scores") or data.get("scores") or []
-            boxes = (
-                data.get("rec_polys")
-                or data.get("rec_boxes")
-                or data.get("dt_polys")
-                or []
-            )
+            def pick(*keys: str):
+                for key in keys:
+                    value = data.get(key)
+                    if value is not None:
+                        return value
+                return []
+
+            texts = pick("rec_texts", "texts")
+            scores = pick("rec_scores", "scores")
+            boxes = pick("rec_polys", "rec_boxes", "dt_polys")
 
             if hasattr(texts, "tolist"):
                 texts = texts.tolist()

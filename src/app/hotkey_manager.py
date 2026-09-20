@@ -29,17 +29,17 @@ class _NativeHotkeyFilter(QAbstractNativeEventFilter):
     def nativeEventFilter(self, event_type, message):  # noqa: N802
         del event_type
         if sys.platform != "win32":
-            return False, 0
+            return False
 
         try:
             msg = wintypes.MSG.from_address(int(message))
         except (TypeError, ValueError):
-            return False, 0
+            return False
 
         if msg.message == WM_HOTKEY and int(msg.wParam) == self._owner.hotkey_id:
             self._owner.hotkey_pressed.emit()
-            return True, 0
-        return False, 0
+            return True
+        return False
 
 
 class HotkeyManager(QObject):
