@@ -43,8 +43,36 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "[4/8] Removing the PaddleOCR 3/PaddleX stack..."
-& $Python -m pip uninstall -y paddleocr paddlex modelscope modelscope-hub opencv-python opencv-contrib-python opencv-python-headless 2>$null
-# pip uninstall returns non-zero when some optional packages do not exist; ignore it.
+$PackagesToRemove = @(
+    "paddleocr",
+    "paddlex",
+    "modelscope",
+    "modelscope-hub",
+    "opencv-python",
+    "opencv-contrib-python",
+    "opencv-python-headless"
+)
+
+$PipListJson = ((& $Python -m pip list --format=json) -join [Environment]::NewLine)
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read the list of installed Python packages."
+}
+
+$InstalledPackages = @(
+    ($PipListJson | ConvertFrom-Json) | ForEach-Object { $_.name }
+)
+
+foreach ($Package in $PackagesToRemove) {
+    if ($InstalledPackages -contains $Package) {
+        Write-Host "  Uninstalling $Package..."
+        & $Python -m pip uninstall -y $Package
+        if ($LASTEXITCODE -ne 0) {
+            throw "Unable to uninstall $Package."
+        }
+    } else {
+        Write-Host "  $Package is not installed; skipping."
+    }
+}
 
 Write-Host "[5/8] Installing PaddlePaddle CPU 3.0.0..."
 & $Python -m pip install --upgrade "paddlepaddle==3.0.0" -i "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
