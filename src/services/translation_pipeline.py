@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -40,6 +41,7 @@ class TranslationPipeline:
         self._ocr = ocr_engine
         self._translations = translation_service
         self._cancelled = threading.Event()
+        self._logger = logging.getLogger("screen_translator.pipeline")
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -50,6 +52,30 @@ class TranslationPipeline:
     def _check_cancelled(self) -> None:
         if self._cancelled.is_set():
             raise OperationCancelled("Translation was cancelled.")
+
+    @staticmethod
+    def build_translation_text(ocr_result: OCRResult) -> str:
+        """Build natural text for the translator from OCR line/block output.
+
+        OCR engines often return one block per visual line. Passing those
+        newlines directly to lightweight translators such as Argos can make
+        each line look like a separate sentence, producing poor translations.
+
+        Keep the original OCRResult untouched for coordinates/debugging, but
+        collapse its blocks into a single whitespace-normalized sentence for
+        translation.
+        """
+        block_texts = [
+            " ".join(block.text.split())
+            for block in ocr_result.blocks
+            if block.text and block.text.strip()
+        ]
+
+        if block_texts:
+            return " ".join(block_texts).strip()
+
+        # Defensive fallback for OCR engines that only populate full_text.
+        return " ".join(ocr_result.full_text.split()).strip()
 
     def translate_region(
         self,
@@ -83,12 +109,19 @@ class TranslationPipeline:
         if ocr_result.is_empty:
             raise NoTextDetectedError("No text detected in the selected area.")
 
+        translation_text = self.build_translation_text(ocr_result)
+        if not translation_text:
+            raise NoTextDetectedError("No usable text detected in the selected area.")
+
+        self._logger.debug("OCR raw text: %r", ocr_result.full_text)
+        self._logger.debug("OCR normalized text: %r", translation_text)
+
         if status_callback:
             status_callback("Translating...")
 
         started = time.perf_counter()
         translated = self._translations.translate(
-            text=ocr_result.full_text,
+            text=translation_text,
             source_language=source_language,
             target_language=target_language,
             provider_name=provider_name,
@@ -97,7 +130,7 @@ class TranslationPipeline:
 
         self._check_cancelled()
         return TranslationResult(
-            source_text=ocr_result.full_text,
+            source_text=translation_text,
             translated_text=translated,
             region=region,
             ocr_result=ocr_result,
