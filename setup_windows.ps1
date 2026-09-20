@@ -25,12 +25,13 @@ if (-not $python311Available) {
 }
 
 Write-Host "[2/6] Creating virtual environment..."
-if (Test-Path ".venv") {
-    Remove-Item -Recurse -Force ".venv"
-}
-& py -3.11 -m venv .venv
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to create the Python 3.11 virtual environment."
+if (-not (Test-Path ".venv\Scripts\python.exe")) {
+    & py -3.11 -m venv .venv
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to create the Python 3.11 virtual environment."
+    }
+} else {
+    Write-Host "Existing .venv found; reusing it."
 }
 
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
@@ -41,22 +42,22 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to upgrade pip."
 }
 
-Write-Host "[4/6] Installing PaddlePaddle CPU..."
-& $Python -m pip install "paddlepaddle==3.2.0" -i "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
+Write-Host "[4/6] Installing/upgrading PaddlePaddle CPU..."
+& $Python -m pip install --upgrade "paddlepaddle==3.3.1" -i "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to install PaddlePaddle."
 }
 
 Write-Host "[5/6] Installing project dependencies..."
-& $Python -m pip install -r requirements.txt
+& $Python -m pip install --upgrade -r requirements.txt
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to install project dependencies."
 }
 
 Write-Host "[6/6] Verifying installation..."
-& $Python -c "import sys, paddle; print('Python:', sys.version.split()[0]); print('PaddlePaddle:', paddle.__version__)"
+& $Python -c "import sys, paddle, paddleocr; print('Python:', sys.version.split()[0]); print('PaddlePaddle:', paddle.__version__); print('PaddleOCR:', paddleocr.__version__)"
 if ($LASTEXITCODE -ne 0) {
-    throw "PaddlePaddle verification failed."
+    throw "PaddlePaddle/PaddleOCR verification failed."
 }
 
 Write-Host ""

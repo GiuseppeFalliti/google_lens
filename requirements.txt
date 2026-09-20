@@ -3,7 +3,7 @@ mss
 Pillow
 numpy
 opencv-python
-paddleocr
+paddleocr==3.7.0
 argostranslate
 httpx
 python-dotenv
