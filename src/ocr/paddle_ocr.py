@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -14,23 +13,22 @@ from .base_ocr import OCREngine
 from .models import OCRResult, OCRTextBlock
 
 
-# PP-OCRv5 mobile models are intentionally used for the desktop MVP.
-# They are considerably lighter than PP-OCRv6 medium and avoid current
-# Windows/CPU issues seen in the default PaddleOCR 3.7 static/oneDNN path.
-_REC_MODEL_MAP = {
-    "en": "en_PP-OCRv5_mobile_rec",
-    "it": "latin_PP-OCRv5_mobile_rec",
-    "fr": "latin_PP-OCRv5_mobile_rec",
-    "de": "latin_PP-OCRv5_mobile_rec",
-    "es": "latin_PP-OCRv5_mobile_rec",
-    "pt": "latin_PP-OCRv5_mobile_rec",
+_PADDLE_LANG_MAP = {
+    "en": "en",
+    "it": "it",
+    "fr": "fr",
+    "de": "german",
+    "es": "es",
+    "pt": "pt",
 }
-
-_DET_MODEL = "PP-OCRv5_mobile_det"
 
 
 class PaddleOCREngine(OCREngine):
-    """Lazy, reusable PaddleOCR adapter for Windows desktop OCR."""
+    """Lazy PaddleOCR 2.10 adapter.
+
+    PaddleOCR 2.x is intentionally used for the Windows MVP because its direct
+    OCR API does not import PaddleX/ModelScope/PyTorch in the OCR process.
+    """
 
     def __init__(self, language: str = "en", min_confidence: float = 0.35) -> None:
         self._language = language.strip().lower()
@@ -42,106 +40,83 @@ class PaddleOCREngine(OCREngine):
     def set_language(self, language: str) -> None:
         self._language = language.strip().lower()
 
-    def _recognition_model(self) -> str:
-        return _REC_MODEL_MAP.get(self._language, "latin_PP-OCRv5_mobile_rec")
-
     def _get_engine(self) -> Any:
-        recognition_model = self._recognition_model()
-        cache_key = f"{_DET_MODEL}:{recognition_model}"
+        paddle_language = _PADDLE_LANG_MAP.get(self._language, self._language)
 
         with self._lock:
-            if cache_key in self._engines:
-                return self._engines[cache_key]
+            if paddle_language in self._engines:
+                return self._engines[paddle_language]
 
             try:
                 from paddleocr import PaddleOCR
 
                 self._logger.info(
-                    "Initializing PaddleOCR detection=%s recognition=%s "
-                    "engine=paddle_dynamic device=cpu mkldnn=off",
-                    _DET_MODEL,
-                    recognition_model,
+                    "Initializing PaddleOCR 2.x language=%s device=cpu mkldnn=off",
+                    paddle_language,
                 )
-
                 engine = PaddleOCR(
-                    text_detection_model_name=_DET_MODEL,
-                    text_recognition_model_name=recognition_model,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=False,
-                    device="cpu",
-                    engine="paddle_dynamic",
+                    lang=paddle_language,
+                    use_angle_cls=False,
+                    use_gpu=False,
                     enable_mkldnn=False,
+                    show_log=False,
                 )
             except Exception as exc:
                 self._logger.exception(
-                    "PaddleOCR initialization failed for detection=%s recognition=%s",
-                    _DET_MODEL,
-                    recognition_model,
+                    "PaddleOCR initialization failed for language=%s",
+                    paddle_language,
                 )
                 raise OCRError(
                     "Unable to initialize PaddleOCR. "
                     f"{type(exc).__name__}: {exc}"
                 ) from exc
 
-            self._engines[cache_key] = engine
+            self._engines[paddle_language] = engine
             return engine
 
     @staticmethod
-    def _to_mapping(result: Any) -> Mapping[str, Any]:
-        if isinstance(result, Mapping):
-            return result
+    def _looks_like_line(value: Any) -> bool:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return False
+        box, recognition = value
+        if not isinstance(box, (list, tuple)):
+            return False
+        if not isinstance(recognition, (list, tuple)) or len(recognition) < 2:
+            return False
+        return isinstance(recognition[0], str)
 
-        for attr_name in ("json", "to_dict"):
-            attr = getattr(result, attr_name, None)
-            if attr is None:
-                continue
-            try:
-                value = attr() if callable(attr) else attr
-            except Exception:
-                continue
-            if isinstance(value, Mapping):
-                return value
+    @classmethod
+    def _iter_lines(cls, value: Any):
+        if cls._looks_like_line(value):
+            yield value
+            return
 
-        try:
-            value = dict(result)
-            if isinstance(value, Mapping):
-                return value
-        except Exception:
-            pass
-
-        return {}
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                yield from cls._iter_lines(item)
 
     @staticmethod
     def _normalise_box(raw_box: Any) -> list[tuple[float, float]]:
-        if raw_box is None:
-            return []
-
         if hasattr(raw_box, "tolist"):
             raw_box = raw_box.tolist()
 
+        points: list[tuple[float, float]] = []
         try:
-            if (
-                len(raw_box) == 4
-                and all(isinstance(value, (int, float, np.number)) for value in raw_box)
-            ):
-                x1, y1, x2, y2 = (float(value) for value in raw_box)
-                return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
-
-            points: list[tuple[float, float]] = []
             for point in raw_box:
                 if hasattr(point, "tolist"):
                     point = point.tolist()
                 if len(point) >= 2:
                     points.append((float(point[0]), float(point[1])))
-            return points
         except Exception:
             return []
+        return points
 
     def recognize(self, image: Image.Image) -> OCRResult:
         try:
             array = np.asarray(image.convert("RGB"))
-            raw_results = list(self._get_engine().predict(array))
+            # PaddleOCR/OpenCV uses BGR internally for ndarray input.
+            bgr = array[:, :, ::-1].copy()
+            raw_result = self._get_engine().ocr(bgr, cls=False)
         except OCRError:
             raise
         except Exception as exc:
@@ -152,50 +127,27 @@ class PaddleOCREngine(OCREngine):
 
         blocks: list[OCRTextBlock] = []
 
-        for raw_result in raw_results:
-            data = self._to_mapping(raw_result)
-            if "res" in data and isinstance(data["res"], Mapping):
-                data = data["res"]
+        for line in self._iter_lines(raw_result):
+            raw_box, recognition = line
+            text = " ".join(str(recognition[0]).split()).strip()
+            if not text:
+                continue
 
-            def pick(*keys: str):
-                for key in keys:
-                    value = data.get(key)
-                    if value is not None:
-                        return value
-                return []
+            try:
+                confidence = float(recognition[1])
+            except (TypeError, ValueError, IndexError):
+                confidence = 0.0
 
-            texts = pick("rec_texts", "texts")
-            scores = pick("rec_scores", "scores")
-            boxes = pick("rec_polys", "rec_boxes", "dt_polys")
+            if confidence < self._min_confidence:
+                continue
 
-            if hasattr(texts, "tolist"):
-                texts = texts.tolist()
-            if hasattr(scores, "tolist"):
-                scores = scores.tolist()
-            if hasattr(boxes, "tolist"):
-                boxes = boxes.tolist()
-
-            for index, text in enumerate(texts):
-                cleaned = " ".join(str(text).split()).strip()
-                if not cleaned:
-                    continue
-
-                try:
-                    confidence = float(scores[index]) if index < len(scores) else 1.0
-                except (TypeError, ValueError):
-                    confidence = 0.0
-
-                if confidence < self._min_confidence:
-                    continue
-
-                raw_box = boxes[index] if index < len(boxes) else []
-                blocks.append(
-                    OCRTextBlock(
-                        text=cleaned,
-                        confidence=confidence,
-                        box=self._normalise_box(raw_box),
-                    )
+            blocks.append(
+                OCRTextBlock(
+                    text=text,
+                    confidence=confidence,
+                    box=self._normalise_box(raw_box),
                 )
+            )
 
         blocks.sort(key=lambda block: (round(block.top / 8) * 8, block.left))
         full_text = "\n".join(block.text for block in blocks).strip()
