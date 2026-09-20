@@ -92,20 +92,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to install the CPU-only PyTorch build required by Argos."
 }
 
-Write-Host "[8/8] Verifying the two ML runtimes in separate processes..."
-& $Python -c "import paddle; print('PaddlePaddle:', paddle.__version__)"
-if ($LASTEXITCODE -ne 0) {
-    throw "PaddlePaddle verification failed."
-}
+Write-Host "[8/8] Verifying Windows ML runtime import order..."
 
-& $Python -c "from paddleocr import PaddleOCR; import paddleocr; print('PaddleOCR:', paddleocr.__version__)"
+# IMPORTANT on Windows:
+# Torch must be loaded before Paddle/PaddleOCR. PaddleOCR 2.10 imports
+# Albumentations, which imports Torch internally; loading Paddle first can
+# cause WinError 127 on torch\\lib\\shm.dll.
+& $Python -c "import torch; print('PyTorch:', torch.__version__); import paddle; print('PaddlePaddle:', paddle.__version__); from paddleocr import PaddleOCR; import paddleocr; print('PaddleOCR:', paddleocr.__version__)"
 if ($LASTEXITCODE -ne 0) {
-    throw "PaddleOCR verification failed."
-}
-
-& $Python -c "import torch; print('PyTorch for Argos:', torch.__version__)"
-if ($LASTEXITCODE -ne 0) {
-    throw "PyTorch/Argos runtime verification failed. Install/repair the Microsoft Visual C++ 2015-2022 x64 Redistributable and retry."
+    throw "Torch -> PaddlePaddle -> PaddleOCR verification failed."
 }
 
 & $Python -c "import argostranslate; print('Argos Translate: OK')"
@@ -115,7 +110,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Setup completed." -ForegroundColor Green
-Write-Host "IMPORTANT: PaddlePaddle OCR and Argos/PyTorch are intentionally run in separate processes."
+Write-Host "IMPORTANT: On Windows the OCR process intentionally imports Torch before Paddle/PaddleOCR to avoid the shm.dll WinError 127 loading-order bug. Argos translations remain isolated in a child process."
 Write-Host ""
 Write-Host "Activate the environment with:"
 Write-Host "  .\.venv\Scripts\Activate.ps1"

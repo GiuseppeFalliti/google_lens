@@ -48,6 +48,12 @@ class PaddleOCREngine(OCREngine):
                 return self._engines[paddle_language]
 
             try:
+                # Windows workaround: PaddleOCR 2.10 imports Albumentations,
+                # which imports PyTorch. Loading Paddle/PaddleOCR before Torch
+                # can trigger WinError 127 on torch\\lib\\shm.dll.
+                # Import Torch first so its native DLLs are resolved before
+                # PaddlePaddle initializes.
+                import torch  # noqa: F401
                 from paddleocr import PaddleOCR
 
                 self._logger.info(
