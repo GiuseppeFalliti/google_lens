@@ -79,6 +79,56 @@ class TranslationPipeline:
         return " ".join(ocr_result.full_text.split()).strip()
 
     @staticmethod
+    def normalize_case_for_translation(text: str, source_language: str) -> str:
+        """Normalize OCR-style casing before machine translation.
+
+        Stylized game/comic text is commonly returned as ALL CAPS or with
+        inconsistent casing such as ABSenCe. Lightweight translation models
+        can interpret those forms poorly even when the recognized letters are
+        otherwise correct.
+
+        Only normalize when the text is clearly dominated by uppercase or
+        contains suspicious mixed-case OCR tokens. Ordinary casing is left
+        untouched.
+        """
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return normalized
+
+        alphabetic = [char for char in normalized if char.isalpha()]
+        if not alphabetic:
+            return normalized
+
+        uppercase_ratio = sum(char.isupper() for char in alphabetic) / len(alphabetic)
+
+        words = _WORD_RE.findall(normalized)
+        suspicious_mixed_case = any(
+            len(word) >= 4
+            and not word.islower()
+            and not word.isupper()
+            and not word.istitle()
+            for word in words
+        )
+
+        if uppercase_ratio < 0.65 and not suspicious_mixed_case:
+            return normalized
+
+        lowered = normalized.lower()
+
+        if source_language.lower() == "en":
+            lowered = re.sub(r"\bi\b", "I", lowered)
+
+        def capitalize_sentence(match: re.Match[str]) -> str:
+            return match.group(1) + match.group(2).upper()
+
+        lowered = re.sub(
+            r"(^|[.!?]\s+)([a-zà-öø-ÿ])",
+            capitalize_sentence,
+            lowered,
+        )
+        return lowered
+
+    @staticmethod
     def lexical_quality(text: str, language: str) -> float:
         """Estimate whether recognized tokens look like real words.
 
@@ -272,12 +322,18 @@ class TranslationPipeline:
 
         self._logger.info("OCR normalized text: %r", translation_text)
 
+        translation_input = self.normalize_case_for_translation(
+            translation_text,
+            source_language,
+        )
+        self._logger.info("Translation input: %r", translation_input)
+
         if status_callback:
             status_callback("Translating...")
 
         started = time.perf_counter()
         translated = self._translations.translate(
-            text=translation_text,
+            text=translation_input,
             source_language=source_language,
             target_language=target_language,
             provider_name=provider_name,
@@ -288,7 +344,7 @@ class TranslationPipeline:
 
         self._check_cancelled()
         return TranslationResult(
-            source_text=translation_text,
+            source_text=translation_input,
             translated_text=translated,
             region=region,
             ocr_result=ocr_result,
