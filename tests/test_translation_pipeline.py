@@ -41,3 +41,18 @@ def test_build_translation_text_falls_back_to_full_text():
     )
 
     assert TranslationPipeline.build_translation_text(ocr_result) == "Hello world"
+
+
+def test_normalize_case_for_translation_fixes_ocr_all_caps_and_mixed_case():
+    text = "NEXT TIME, I AM MARKING IT AS AN UNEXCUSED ABSenCe, SO BE CAREFUL!"
+
+    assert (
+        TranslationPipeline.normalize_case_for_translation(text, "en")
+        == "Next time, I am marking it as an unexcused absence, so be careful!"
+    )
+
+
+def test_normalize_case_for_translation_preserves_normal_text():
+    text = "This is already normal English."
+
+    assert TranslationPipeline.normalize_case_for_translation(text, "en") == text
