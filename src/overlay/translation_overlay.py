@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QLabel, QWidget
 
+from src.utils.display_geometry import physical_region_to_qt_logical
 from src.utils.geometry import Rect
 
 
@@ -12,8 +15,10 @@ class TranslationOverlay(QWidget):
 
     def __init__(self, text: str, region: Rect, opacity: float = 0.82) -> None:
         super().__init__(None)
-        self._region = region
+        self._capture_region = region
+        self._region = physical_region_to_qt_logical(region)
         self._opacity = min(1.0, max(0.30, opacity))
+        self._logger = logging.getLogger("screen_translator.overlay")
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -32,6 +37,23 @@ class TranslationOverlay(QWidget):
             desktop = desktop.united(screen.geometry())
         self._desktop = desktop
         self.setGeometry(desktop)
+
+        self._logger.info(
+            "Overlay mapping physical=(%d,%d %dx%d) -> qt=(%d,%d %dx%d) "
+            "qt_desktop=(%d,%d %dx%d)",
+            self._capture_region.x,
+            self._capture_region.y,
+            self._capture_region.width,
+            self._capture_region.height,
+            self._region.x,
+            self._region.y,
+            self._region.width,
+            self._region.height,
+            self._desktop.x(),
+            self._desktop.y(),
+            self._desktop.width(),
+            self._desktop.height(),
+        )
 
         self._label = QLabel(text, self)
         self._label.setWordWrap(True)
