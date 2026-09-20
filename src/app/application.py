@@ -18,6 +18,7 @@ from src.ocr.paddle_ocr import PaddleOCREngine
 from src.overlay.overlay_manager import OverlayManager
 from src.services.translation_pipeline import TranslationPipeline, TranslationResult
 from src.translation.argos_translator import ArgosTranslator
+from src.translation.azure_translator import AzureTranslator
 from src.translation.deepl_translator import DeepLTranslator
 from src.translation.libretranslate_translator import LibreTranslateTranslator
 from src.translation.translation_service import TranslationService
@@ -164,6 +165,13 @@ class ScreenTranslatorApplication(QObject):
 
     def _configure_translation_providers(self) -> None:
         self.translation_service.register(self.argos)
+        self.translation_service.register(
+            AzureTranslator(
+                api_key=self.settings.azure_api_key,
+                region=self.settings.azure_region,
+                endpoint=self.settings.azure_endpoint,
+            )
+        )
         self.translation_service.register(
             DeepLTranslator(
                 api_key=self.settings.deepl_api_key,

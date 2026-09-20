@@ -13,10 +13,12 @@ def test_settings_round_trip(tmp_path):
     expected = AppSettings(
         source_language="en",
         target_language="it",
-        translation_provider="libretranslate",
+        translation_provider="azure",
         global_hotkey="CTRL+SHIFT+T",
         overlay_opacity=0.75,
-        libretranslate_url="http://localhost:5000",
+        azure_api_key="secret",
+        azure_region="westeurope",
+        azure_endpoint="https://api.cognitive.microsofttranslator.com",
     )
 
     manager.save(expected)
@@ -24,5 +26,8 @@ def test_settings_round_trip(tmp_path):
 
     assert actual.source_language == "en"
     assert actual.target_language == "it"
-    assert actual.translation_provider == "libretranslate"
+    assert actual.translation_provider == "azure"
     assert actual.overlay_opacity == pytest.approx(0.75)
+    assert actual.azure_api_key == "secret"
+    assert actual.azure_region == "westeurope"
+    assert actual.azure_endpoint == "https://api.cognitive.microsofttranslator.com"

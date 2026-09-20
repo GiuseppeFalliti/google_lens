@@ -39,6 +39,11 @@ class SettingsManager:
                 self._settings.value("general/start_minimized", defaults.start_minimized),
                 defaults.start_minimized,
             ),
+            azure_api_key=str(self._settings.value("azure/api_key", "")),
+            azure_region=str(self._settings.value("azure/region", "")),
+            azure_endpoint=str(
+                self._settings.value("azure/endpoint", defaults.azure_endpoint)
+            ),
             libretranslate_url=str(
                 self._settings.value(
                     "libretranslate/base_url", defaults.libretranslate_url
@@ -70,6 +75,11 @@ class SettingsManager:
         self._settings.setValue("general/global_hotkey", settings.global_hotkey)
         self._settings.setValue("overlay/opacity", settings.overlay_opacity)
         self._settings.setValue("general/start_minimized", settings.start_minimized)
+
+        self._settings.setValue("azure/api_key", settings.azure_api_key)
+        self._settings.setValue("azure/region", settings.azure_region)
+        self._settings.setValue("azure/endpoint", settings.azure_endpoint)
+
         self._settings.setValue("libretranslate/base_url", settings.libretranslate_url)
         self._settings.setValue(
             "libretranslate/api_key", settings.libretranslate_api_key

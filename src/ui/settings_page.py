@@ -49,6 +49,7 @@ class SettingsPage(QWidget):
 
         self.provider_stack = QStackedWidget()
         self.provider_stack.addWidget(self._create_argos_panel())
+        self.provider_stack.addWidget(self._create_azure_panel())
         self.provider_stack.addWidget(self._create_deepl_panel())
         self.provider_stack.addWidget(self._create_libre_panel())
         translation_form.addRow("Provider settings:", self.provider_stack)
@@ -99,6 +100,30 @@ class SettingsPage(QWidget):
         layout.addWidget(self.argos_download)
         return panel
 
+    def _create_azure_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self.azure_key = QLineEdit()
+        self.azure_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.azure_key.setPlaceholderText("Azure Translator key")
+
+        self.azure_region = QLineEdit()
+        self.azure_region.setPlaceholderText(
+            "Optional for global Translator resources"
+        )
+
+        self.azure_endpoint = QLineEdit()
+        self.azure_endpoint.setPlaceholderText(
+            "https://api.cognitive.microsofttranslator.com"
+        )
+
+        form.addRow("API key:", self.azure_key)
+        form.addRow("Region:", self.azure_region)
+        form.addRow("Endpoint:", self.azure_endpoint)
+        return panel
+
     def _create_deepl_panel(self) -> QWidget:
         panel = QWidget()
         form = QFormLayout(panel)
@@ -123,7 +148,12 @@ class SettingsPage(QWidget):
 
     def _sync_provider_panel(self) -> None:
         code = str(self.provider_combo.currentData())
-        index = {"argos": 0, "deepl": 1, "libretranslate": 2}.get(code, 0)
+        index = {
+            "argos": 0,
+            "azure": 1,
+            "deepl": 2,
+            "libretranslate": 3,
+        }.get(code, 0)
         self.provider_stack.setCurrentIndex(index)
 
     @staticmethod
@@ -136,9 +166,15 @@ class SettingsPage(QWidget):
         self._set_combo_data(self.source_combo, settings.source_language)
         self._set_combo_data(self.target_combo, settings.target_language)
         self._set_combo_data(self.provider_combo, settings.translation_provider)
+
         self.hotkey_edit.setText(settings.global_hotkey)
         self.opacity_slider.setValue(round(settings.overlay_opacity * 100))
         self.start_minimized.setChecked(settings.start_minimized)
+
+        self.azure_key.setText(settings.azure_api_key)
+        self.azure_region.setText(settings.azure_region)
+        self.azure_endpoint.setText(settings.azure_endpoint)
+
         self.libre_url.setText(settings.libretranslate_url)
         self.libre_key.setText(settings.libretranslate_api_key)
         self.deepl_key.setText(settings.deepl_api_key)
@@ -153,6 +189,11 @@ class SettingsPage(QWidget):
             global_hotkey=self.hotkey_edit.text(),
             overlay_opacity=self.opacity_slider.value() / 100.0,
             start_minimized=self.start_minimized.isChecked(),
+
+            azure_api_key=self.azure_key.text(),
+            azure_region=self.azure_region.text(),
+            azure_endpoint=self.azure_endpoint.text(),
+
             libretranslate_url=self.libre_url.text(),
             libretranslate_api_key=self.libre_key.text(),
             deepl_api_key=self.deepl_key.text(),

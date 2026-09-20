@@ -14,6 +14,7 @@ LANGUAGES: dict[str, str] = {
 
 PROVIDERS: dict[str, str] = {
     "Argos Translate": "argos",
+    "Azure Translator": "azure",
     "DeepL": "deepl",
     "LibreTranslate": "libretranslate",
 }
@@ -27,6 +28,11 @@ class AppSettings:
     global_hotkey: str = "CTRL+SHIFT+T"
     overlay_opacity: float = 0.82
     start_minimized: bool = False
+
+    azure_api_key: str = ""
+    azure_region: str = ""
+    azure_endpoint: str = "https://api.cognitive.microsofttranslator.com"
+
     libretranslate_url: str = "http://localhost:5000"
     libretranslate_api_key: str = ""
     deepl_api_key: str = ""
@@ -43,7 +49,7 @@ class AppSettings:
             raise ValueError("Source and target languages are required.")
         if source == target:
             raise ValueError("Source and target languages must be different.")
-        if provider not in {"argos", "deepl", "libretranslate"}:
+        if provider not in {"argos", "azure", "deepl", "libretranslate"}:
             raise ValueError(f"Unsupported translation provider: {provider}")
         if not 0.30 <= float(self.overlay_opacity) <= 1.0:
             raise ValueError("Overlay opacity must be between 0.30 and 1.0.")
@@ -60,6 +66,9 @@ class AppSettings:
             global_hotkey=hotkey,
             overlay_opacity=float(self.overlay_opacity),
             ocr_min_confidence=float(self.ocr_min_confidence),
+            azure_api_key=self.azure_api_key.strip(),
+            azure_region=self.azure_region.strip(),
+            azure_endpoint=self.azure_endpoint.strip().rstrip("/"),
             libretranslate_url=self.libretranslate_url.strip().rstrip("/"),
             deepl_api_url=self.deepl_api_url.strip(),
         )
