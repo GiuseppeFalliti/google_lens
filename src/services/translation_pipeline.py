@@ -2,17 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import statistics
 import threading
 import time
 from collections.abc import Callable
 
 from src.capture.screen_capture import ScreenCapture
-from src.exceptions import NoTextDetectedError, OperationCancelled
+from src.exceptions import NoTextDetectedError, OCRError, OperationCancelled
 from src.ocr.base_ocr import OCREngine
-from src.ocr.models import OCRResult
+from src.ocr.models import OCRResult, OCRTextBlock
 from src.translation.translation_service import TranslationService
 from src.utils.geometry import Rect
-from src.utils.image_utils import preprocess_for_ocr
+from src.utils.image_utils import OCRImageVariant, build_ocr_variants
 
 
 StatusCallback = Callable[[str], None]
@@ -55,16 +56,7 @@ class TranslationPipeline:
 
     @staticmethod
     def build_translation_text(ocr_result: OCRResult) -> str:
-        """Build natural text for the translator from OCR line/block output.
-
-        OCR engines often return one block per visual line. Passing those
-        newlines directly to lightweight translators such as Argos can make
-        each line look like a separate sentence, producing poor translations.
-
-        Keep the original OCRResult untouched for coordinates/debugging, but
-        collapse its blocks into a single whitespace-normalized sentence for
-        translation.
-        """
+        """Build natural text for the translator from OCR line/block output."""
         block_texts = [
             " ".join(block.text.split())
             for block in ocr_result.blocks
@@ -74,8 +66,110 @@ class TranslationPipeline:
         if block_texts:
             return " ".join(block_texts).strip()
 
-        # Defensive fallback for OCR engines that only populate full_text.
         return " ".join(ocr_result.full_text.split()).strip()
+
+    @staticmethod
+    def score_ocr_result(ocr_result: OCRResult) -> float:
+        """Score an OCR candidate using confidence plus useful text coverage.
+
+        Confidence remains the dominant factor, while a modest coverage bonus
+        prevents a very short, high-confidence fragment from beating a more
+        complete reading of the selected sentence.
+        """
+        if ocr_result.is_empty or not ocr_result.blocks:
+            return -1.0
+
+        confidences = [
+            max(0.0, min(1.0, float(block.confidence)))
+            for block in ocr_result.blocks
+        ]
+        average_confidence = sum(confidences) / len(confidences)
+        median_confidence = statistics.median(confidences)
+
+        normalized_text = " ".join(ocr_result.full_text.split())
+        alphanumeric_chars = sum(character.isalnum() for character in normalized_text)
+        coverage = min(1.0, alphanumeric_chars / 80.0)
+        block_coverage = min(1.0, len(ocr_result.blocks) / 5.0)
+
+        return (
+            average_confidence * 0.60
+            + median_confidence * 0.25
+            + coverage * 0.10
+            + block_coverage * 0.05
+        )
+
+    @staticmethod
+    def rescale_ocr_result(ocr_result: OCRResult, scale: float) -> OCRResult:
+        """Map OCR boxes from an upscaled variant back to the selected region."""
+        if scale == 1.0:
+            return ocr_result
+
+        blocks = [
+            OCRTextBlock(
+                text=block.text,
+                confidence=block.confidence,
+                box=[
+                    (point_x / scale, point_y / scale)
+                    for point_x, point_y in block.box
+                ],
+            )
+            for block in ocr_result.blocks
+        ]
+        return OCRResult(blocks=blocks, full_text=ocr_result.full_text)
+
+    def _recognize_best_variant(
+        self,
+        variants: list[OCRImageVariant],
+        status_callback: StatusCallback | None = None,
+    ) -> OCRResult:
+        best_result: OCRResult | None = None
+        best_score = -1.0
+        best_variant = ""
+        last_error: OCRError | None = None
+
+        for index, variant in enumerate(variants, start=1):
+            self._check_cancelled()
+            if status_callback:
+                status_callback(
+                    f"Recognizing text... ({index}/{len(variants)})"
+                )
+
+            try:
+                result = self._ocr.recognize(variant.image)
+            except OCRError as exc:
+                last_error = exc
+                self._logger.warning(
+                    "OCR variant %s failed: %s",
+                    variant.name,
+                    exc,
+                )
+                continue
+
+            score = self.score_ocr_result(result)
+            self._logger.debug(
+                "OCR candidate variant=%s score=%.4f blocks=%d text=%r",
+                variant.name,
+                score,
+                len(result.blocks),
+                result.full_text,
+            )
+
+            if score > best_score:
+                best_result = self.rescale_ocr_result(result, variant.scale)
+                best_score = score
+                best_variant = variant.name
+
+        if best_result is None:
+            if last_error is not None:
+                raise last_error
+            return OCRResult(blocks=[], full_text="")
+
+        self._logger.info(
+            "Selected OCR variant=%s score=%.4f",
+            best_variant,
+            best_score,
+        )
+        return best_result
 
     def translate_region(
         self,
@@ -95,15 +189,23 @@ class TranslationPipeline:
 
         self._check_cancelled()
         if status_callback:
-            status_callback("Recognizing text...")
+            status_callback("Preparing OCR variants...")
 
         self._ocr.set_language(source_language)
-        image = preprocess_for_ocr(image)
+        variants = build_ocr_variants(image)
+        del image
+
         started = time.perf_counter()
-        ocr_result = self._ocr.recognize(image)
+        try:
+            ocr_result = self._recognize_best_variant(
+                variants,
+                status_callback=status_callback,
+            )
+        finally:
+            for variant in variants:
+                variant.image.close()
         ocr_seconds = time.perf_counter() - started
 
-        del image
         self._check_cancelled()
 
         if ocr_result.is_empty:
