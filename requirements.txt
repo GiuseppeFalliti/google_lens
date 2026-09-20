@@ -4,7 +4,6 @@ Pillow
 numpy
 opencv-python
 paddleocr
-paddlepaddle
 argostranslate
 httpx
 python-dotenv
