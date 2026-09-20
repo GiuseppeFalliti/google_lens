@@ -201,8 +201,49 @@ class ScreenTranslatorApplication(QObject):
         self.window.raise_()
         self.window.activateWindow()
 
+    def _sync_current_ui_settings(self) -> bool:
+        """Apply the values currently visible in the GUI before translating.
+
+        This prevents a stale saved provider (for example Argos) from being
+        used when the user has selected Azure but has not clicked Save settings.
+        """
+        try:
+            current = self.window.settings_page.values()
+        except ValueError as exc:
+            self._handle_error(str(exc))
+            return False
+
+        if current == self.settings:
+            return True
+
+        old_hotkey = self.settings.global_hotkey
+
+        try:
+            current = self.settings_manager.save(current)
+        except ValueError as exc:
+            self._handle_error(str(exc))
+            return False
+
+        self.settings = current
+        self._configure_translation_providers()
+        self.ocr.set_language(current.source_language)
+
+        if current.global_hotkey != old_hotkey:
+            self._register_hotkey(current.global_hotkey)
+
+        self.logger.info(
+            "Applied current GUI settings provider=%s source=%s target=%s",
+            current.translation_provider,
+            current.source_language,
+            current.target_language,
+        )
+        return True
+
     @Slot()
     def start_selection(self) -> None:
+        if not self._sync_current_ui_settings():
+            return
+
         self._job_id += 1
         self.pipeline.cancel()
         self.overlay_manager.close()
