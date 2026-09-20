@@ -54,8 +54,8 @@ class TranslationOverlay(QWidget):
         self._position_label()
 
     def _position_label(self) -> None:
-        x = self._region.x - self._desktop.x
-        y = self._region.y - self._desktop.y
+        x = self._region.x - self._desktop.x()
+        y = self._region.y - self._desktop.y()
 
         width = max(220, self._region.width)
         width = min(width, max(220, self._desktop.width() - max(0, x)))
