@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
 class TrayManager(QObject):
     translate_requested = Signal()
+    live_scan_requested = Signal()
+    stop_live_scan_requested = Signal()
     open_requested = Signal()
     settings_requested = Signal()
     exit_requested = Signal()
@@ -23,6 +25,15 @@ class TrayManager(QObject):
         translate_action = QAction("Translate region", menu)
         translate_action.triggered.connect(self.translate_requested)
         menu.addAction(translate_action)
+
+        live_action = QAction("Start / reselect live scan area", menu)
+        live_action.triggered.connect(self.live_scan_requested)
+        menu.addAction(live_action)
+
+        self.stop_live_action = QAction("Stop live scan", menu)
+        self.stop_live_action.setEnabled(False)
+        self.stop_live_action.triggered.connect(self.stop_live_scan_requested)
+        menu.addAction(self.stop_live_action)
 
         menu.addSeparator()
 
@@ -46,6 +57,9 @@ class TrayManager(QObject):
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.open_requested.emit()
+
+    def set_live_mode(self, active: bool) -> None:
+        self.stop_live_action.setEnabled(active)
 
     def show(self) -> None:
         self.tray.show()

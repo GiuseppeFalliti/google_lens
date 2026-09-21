@@ -28,6 +28,12 @@ class OverlayManager:
         translations: list[tuple[str, Rect]],
         opacity: float,
     ) -> None:
+        if isinstance(self._overlay, MultiTranslationOverlay):
+            self._overlay.update_translations(translations)
+            if not self._overlay.isVisible():
+                self._overlay.show_overlay()
+            return
+
         self.close()
         overlay = MultiTranslationOverlay(
             translations=translations,

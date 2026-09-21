@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.config.settings import AppSettings
+from src.utils.window_capture import exclude_widget_from_capture
 
 from .settings_page import SettingsPage
 from .status_widget import StatusWidget
@@ -20,16 +21,18 @@ from .status_widget import StatusWidget
 
 class MainWindow(QMainWindow):
     translate_requested = Signal()
-    full_screen_translate_requested = Signal()
+    live_scan_requested = Signal()
+    stop_live_scan_requested = Signal()
     settings_saved = Signal(object)
     install_argos_requested = Signal(str, str)
 
     def __init__(self, settings: AppSettings) -> None:
         super().__init__()
         self._allow_close = False
+        self._live_mode = False
 
         self.setWindowTitle("Screen Translator")
-        self.resize(680, 590)
+        self.resize(720, 610)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -39,8 +42,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Translate a selected region or scan the whole screen and place "
-            "translations over detected text."
+            "Translate one selected region, or select a larger reading area and "
+            "keep it translated automatically while the content changes or scrolls."
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -55,19 +58,23 @@ class MainWindow(QMainWindow):
 
         self.translate_button = QPushButton("Translate selected region")
         self.translate_button.setToolTip(
-            "Select one rectangular area and translate it."
+            "Select one rectangular area and translate it once."
         )
         self.translate_button.clicked.connect(self.translate_requested)
         translate_actions.addWidget(self.translate_button)
 
-        self.full_screen_button = QPushButton("Translate full screen")
-        self.full_screen_button.setToolTip(
-            "Scan the entire desktop and create translation boxes over detected text."
+        self.live_scan_button = QPushButton("Start live scan area")
+        self.live_scan_button.setToolTip(
+            "Select a large reading area. Text inside it is re-scanned automatically "
+            "when the content changes, for example while scrolling a manga."
         )
-        self.full_screen_button.clicked.connect(
-            self.full_screen_translate_requested
-        )
-        translate_actions.addWidget(self.full_screen_button)
+        self.live_scan_button.clicked.connect(self.live_scan_requested)
+        translate_actions.addWidget(self.live_scan_button)
+
+        self.stop_live_button = QPushButton("Stop live scan")
+        self.stop_live_button.setEnabled(False)
+        self.stop_live_button.clicked.connect(self.stop_live_scan_requested)
+        translate_actions.addWidget(self.stop_live_button)
 
         layout.addLayout(translate_actions)
 
@@ -83,6 +90,10 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # Keep our own GUI out of MSS captures while still leaving it visible
+        # and usable during live scan mode.
+        exclude_widget_from_capture(self)
+
     def _save(self) -> None:
         try:
             settings = self.settings_page.values()
@@ -96,7 +107,16 @@ class MainWindow(QMainWindow):
 
     def set_processing(self, processing: bool) -> None:
         self.translate_button.setEnabled(not processing)
-        self.full_screen_button.setEnabled(not processing)
+        self.live_scan_button.setEnabled(not processing or self._live_mode)
+
+    def set_live_mode(self, active: bool) -> None:
+        self._live_mode = active
+        self.stop_live_button.setEnabled(active)
+        self.live_scan_button.setText(
+            "Reselect live scan area" if active else "Start live scan area"
+        )
+        self.translate_button.setEnabled(True)
+        self.live_scan_button.setEnabled(True)
 
     def show_error(self, message: str) -> None:
         QMessageBox.warning(self, "Screen Translator", message)
