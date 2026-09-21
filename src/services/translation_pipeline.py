@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from PIL import Image
 from wordfreq import zipf_frequency
 
 from src.capture.screen_capture import ScreenCapture
@@ -68,6 +69,17 @@ class FullScreenTranslationResult:
 
 
 @dataclass(slots=True)
+class LiveRegionTranslationResult:
+    items: list[ScreenTranslationItem]
+    frame_signature: bytes
+    changed: bool
+    change_score: float
+    capture_seconds: float
+    ocr_seconds: float
+    translation_seconds: float
+
+
+@dataclass(slots=True)
 class _OCRGroup:
     blocks: list[OCRTextBlock]
     rect: Rect
@@ -75,6 +87,9 @@ class _OCRGroup:
 
 class TranslationPipeline:
     MAX_FULLSCREEN_REGIONS = 60
+    MAX_LIVE_REGIONS = 50
+    LIVE_CHANGE_THRESHOLD = 1.35
+    TRANSLATION_CACHE_LIMIT = 1200
 
     def __init__(
         self,
@@ -87,6 +102,7 @@ class TranslationPipeline:
         self._translations = translation_service
         self._cancelled = threading.Event()
         self._logger = logging.getLogger("screen_translator.pipeline")
+        self._translation_cache: dict[tuple[str, str, str, str], str] = {}
 
     def cancel(self) -> None:
         self._cancelled.set()
@@ -360,6 +376,103 @@ class TranslationPipeline:
             return 0.0
         return sum(float(block.confidence) for block in group.blocks) / len(group.blocks)
 
+    @staticmethod
+    def _frame_signature(image: Image.Image) -> bytes:
+        preview = image.convert("L").resize((64, 36), Image.Resampling.BILINEAR)
+        try:
+            return bytes(preview.getdata())
+        finally:
+            preview.close()
+
+    @staticmethod
+    def frame_change_score(previous: bytes | None, current: bytes) -> float:
+        if previous is None or len(previous) != len(current):
+            return 255.0
+        if not current:
+            return 0.0
+        return sum(abs(a - b) for a, b in zip(previous, current)) / len(current)
+
+    @staticmethod
+    def _ocr_character_count(result: OCRResult) -> int:
+        return sum(character.isalnum() for character in result.full_text)
+
+    @staticmethod
+    def _ocr_average_confidence(result: OCRResult) -> float:
+        if not result.blocks:
+            return 0.0
+        return sum(float(block.confidence) for block in result.blocks) / len(result.blocks)
+
+    @classmethod
+    def _choose_live_ocr_result(
+        cls,
+        original: OCRResult,
+        enhanced: OCRResult,
+    ) -> tuple[OCRResult, str]:
+        if original.is_empty:
+            return enhanced, "enhanced"
+        if enhanced.is_empty:
+            return original, "original"
+
+        original_chars = cls._ocr_character_count(original)
+        enhanced_chars = cls._ocr_character_count(enhanced)
+        original_conf = cls._ocr_average_confidence(original)
+        enhanced_conf = cls._ocr_average_confidence(enhanced)
+
+        # Prefer the stable original reading unless the enhanced pass recovers
+        # materially more text without a large confidence drop.
+        if (
+            enhanced_chars >= max(original_chars + 8, math.ceil(original_chars * 1.25))
+            and enhanced_conf >= original_conf - 0.12
+        ):
+            return enhanced, "enhanced"
+
+        return original, "original"
+
+    def _translate_many_cached(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+        provider_name: str,
+    ) -> tuple[list[str], int]:
+        keys = [
+            (
+                provider_name.lower(),
+                source_language.lower(),
+                target_language.lower(),
+                text,
+            )
+            for text in texts
+        ]
+
+        missing_keys: list[tuple[str, str, str, str]] = []
+        missing_texts: list[str] = []
+        seen_missing: set[tuple[str, str, str, str]] = set()
+
+        for key, text in zip(keys, texts):
+            if key in self._translation_cache or key in seen_missing:
+                continue
+            seen_missing.add(key)
+            missing_keys.append(key)
+            missing_texts.append(text)
+
+        if missing_texts:
+            translated = self._translations.translate_many(
+                texts=missing_texts,
+                source_language=source_language,
+                target_language=target_language,
+                provider_name=provider_name,
+            )
+            for key, value in zip(missing_keys, translated):
+                self._translation_cache[key] = value
+
+        if len(self._translation_cache) > self.TRANSLATION_CACHE_LIMIT:
+            remove_count = len(self._translation_cache) - self.TRANSLATION_CACHE_LIMIT // 2
+            for key in list(self._translation_cache)[:remove_count]:
+                self._translation_cache.pop(key, None)
+
+        return [self._translation_cache[key] for key in keys], len(missing_texts)
+
     def translate_region(
         self,
         region: Rect,
@@ -437,6 +550,181 @@ class TranslationPipeline:
             translation_seconds=translation_seconds,
         )
 
+    def translate_live_region(
+        self,
+        region: Rect,
+        source_language: str,
+        target_language: str,
+        provider_name: str,
+        previous_signature: bytes | None = None,
+        status_callback: StatusCallback | None = None,
+    ) -> LiveRegionTranslationResult:
+        self._check_cancelled()
+
+        if status_callback:
+            status_callback("Checking live scan area...")
+
+        started = time.perf_counter()
+        image = self._capture.capture_region(region)
+        capture_seconds = time.perf_counter() - started
+
+        signature = self._frame_signature(image)
+        change_score = self.frame_change_score(previous_signature, signature)
+
+        if previous_signature is not None and change_score < self.LIVE_CHANGE_THRESHOLD:
+            image.close()
+            return LiveRegionTranslationResult(
+                items=[],
+                frame_signature=signature,
+                changed=False,
+                change_score=change_score,
+                capture_seconds=capture_seconds,
+                ocr_seconds=0.0,
+                translation_seconds=0.0,
+            )
+
+        self._check_cancelled()
+        self._ocr.set_language(source_language)
+
+        if status_callback:
+            status_callback("Reading changed content...")
+
+        started = time.perf_counter()
+        try:
+            original = self._ocr.recognize(image)
+
+            pixel_count = image.width * image.height
+            if pixel_count <= 1_500_000:
+                upscale = 1.55
+            elif pixel_count <= 2_500_000:
+                upscale = 1.30
+            else:
+                upscale = 1.0
+
+            enhanced_image = preprocess_for_ocr(
+                image,
+                grayscale=True,
+                autocontrast=True,
+                contrast=1.30,
+                sharpness=1.40,
+                upscale=upscale,
+            )
+            try:
+                enhanced = self._ocr.recognize(enhanced_image)
+                enhanced = self.rescale_ocr_result(enhanced, upscale)
+            finally:
+                enhanced_image.close()
+
+            ocr_result, selected_pass = self._choose_live_ocr_result(
+                original,
+                enhanced,
+            )
+        finally:
+            image.close()
+
+        ocr_seconds = time.perf_counter() - started
+        self._check_cancelled()
+
+        self._logger.info(
+            "Live OCR change=%.3f selected=%s original_blocks=%d enhanced_blocks=%d "
+            "selected_blocks=%d",
+            change_score,
+            selected_pass,
+            len(original.blocks),
+            len(enhanced.blocks),
+            len(ocr_result.blocks),
+        )
+
+        if ocr_result.is_empty:
+            return LiveRegionTranslationResult(
+                items=[],
+                frame_signature=signature,
+                changed=True,
+                change_score=change_score,
+                capture_seconds=capture_seconds,
+                ocr_seconds=ocr_seconds,
+                translation_seconds=0.0,
+            )
+
+        groups = self._group_ocr_blocks(ocr_result.blocks)
+        if len(groups) > self.MAX_LIVE_REGIONS:
+            groups = groups[: self.MAX_LIVE_REGIONS]
+
+        prepared: list[tuple[_OCRGroup, str]] = []
+        for group in groups:
+            text = self._group_text(group)
+            if not text or not any(character.isalnum() for character in text):
+                continue
+            text = self.normalize_case_for_translation(text, source_language)
+            if text:
+                prepared.append((group, text))
+
+        if not prepared:
+            return LiveRegionTranslationResult(
+                items=[],
+                frame_signature=signature,
+                changed=True,
+                change_score=change_score,
+                capture_seconds=capture_seconds,
+                ocr_seconds=ocr_seconds,
+                translation_seconds=0.0,
+            )
+
+        if status_callback:
+            status_callback(f"Updating {len(prepared)} translated regions...")
+
+        translation_inputs = [text for _, text in prepared]
+        started = time.perf_counter()
+        translations, api_text_count = self._translate_many_cached(
+            translation_inputs,
+            source_language,
+            target_language,
+            provider_name,
+        )
+        translation_seconds = time.perf_counter() - started
+
+        items: list[ScreenTranslationItem] = []
+        for (group, source_text), translated_text in zip(prepared, translations):
+            relative = group.rect
+            physical = Rect(
+                region.x + relative.x,
+                region.y + relative.y,
+                relative.width,
+                relative.height,
+            ).clamp(region)
+
+            if physical.is_valid:
+                items.append(
+                    ScreenTranslationItem(
+                        source_text=source_text,
+                        translated_text=translated_text,
+                        region=physical,
+                        confidence=self._group_confidence(group),
+                    )
+                )
+
+        self._logger.info(
+            "Live scan updated change=%.3f groups=%d items=%d new_translations=%d "
+            "capture=%.3fs ocr=%.3fs translation=%.3fs",
+            change_score,
+            len(groups),
+            len(items),
+            api_text_count,
+            capture_seconds,
+            ocr_seconds,
+            translation_seconds,
+        )
+
+        return LiveRegionTranslationResult(
+            items=items,
+            frame_signature=signature,
+            changed=True,
+            change_score=change_score,
+            capture_seconds=capture_seconds,
+            ocr_seconds=ocr_seconds,
+            translation_seconds=translation_seconds,
+        )
+
     def translate_full_screen(
         self,
         source_language: str,
@@ -444,6 +732,7 @@ class TranslationPipeline:
         provider_name: str,
         status_callback: StatusCallback | None = None,
     ) -> FullScreenTranslationResult:
+        """Legacy one-shot full desktop scan kept for compatibility/tests."""
         self._check_cancelled()
         if status_callback:
             status_callback("Capturing full screen...")
@@ -453,116 +742,57 @@ class TranslationPipeline:
         capture_seconds = time.perf_counter() - started
 
         self._ocr.set_language(source_language)
-        if status_callback:
-            status_callback("Recognizing screen text...")
-
         started = time.perf_counter()
         try:
             ocr_result = self._ocr.recognize(image)
-
-            # Full-screen upscaling would consume a large amount of memory.
-            # Retry once with a same-size enhanced image only when the normal
-            # pass found nothing.
-            if ocr_result.is_empty:
-                enhanced = preprocess_for_ocr(
-                    image,
-                    grayscale=True,
-                    autocontrast=True,
-                    contrast=1.25,
-                    sharpness=1.35,
-                )
-                try:
-                    ocr_result = self._ocr.recognize(enhanced)
-                finally:
-                    enhanced.close()
         finally:
             image.close()
         ocr_seconds = time.perf_counter() - started
 
-        self._check_cancelled()
         if ocr_result.is_empty:
             raise NoTextDetectedError("No text detected on the screen.")
 
-        groups = self._group_ocr_blocks(ocr_result.blocks)
-        if not groups:
-            raise NoTextDetectedError("No positioned text regions detected on the screen.")
-
-        if len(groups) > self.MAX_FULLSCREEN_REGIONS:
-            self._logger.warning(
-                "Full-screen OCR produced %d groups; limiting overlays to %d.",
-                len(groups),
-                self.MAX_FULLSCREEN_REGIONS,
-            )
-            groups = groups[: self.MAX_FULLSCREEN_REGIONS]
-
+        groups = self._group_ocr_blocks(ocr_result.blocks)[: self.MAX_FULLSCREEN_REGIONS]
         prepared: list[tuple[_OCRGroup, str]] = []
         for group in groups:
             text = self._group_text(group)
-            if len(text) < 2:
-                continue
-            text = self.normalize_case_for_translation(text, source_language)
             if text:
-                prepared.append((group, text))
+                prepared.append(
+                    (
+                        group,
+                        self.normalize_case_for_translation(text, source_language),
+                    )
+                )
 
         if not prepared:
             raise NoTextDetectedError("No usable text detected on the screen.")
 
-        self._logger.info(
-            "Full-screen OCR blocks=%d groups=%d translated_regions=%d",
-            len(ocr_result.blocks),
-            len(groups),
-            len(prepared),
-        )
-
-        if status_callback:
-            status_callback(f"Translating {len(prepared)} screen regions...")
-
-        translation_inputs = [text for _, text in prepared]
         started = time.perf_counter()
         translations = self._translations.translate_many(
-            texts=translation_inputs,
+            texts=[text for _, text in prepared],
             source_language=source_language,
             target_language=target_language,
             provider_name=provider_name,
         )
         translation_seconds = time.perf_counter() - started
 
-        self._check_cancelled()
         items: list[ScreenTranslationItem] = []
-
         for (group, source_text), translated_text in zip(prepared, translations):
-            relative = group.rect
             physical = Rect(
-                desktop_region.x + relative.x,
-                desktop_region.y + relative.y,
-                relative.width,
-                relative.height,
+                desktop_region.x + group.rect.x,
+                desktop_region.y + group.rect.y,
+                group.rect.width,
+                group.rect.height,
             ).clamp(desktop_region)
-
-            if not physical.is_valid:
-                continue
-
-            items.append(
-                ScreenTranslationItem(
-                    source_text=source_text,
-                    translated_text=translated_text,
-                    region=physical,
-                    confidence=self._group_confidence(group),
+            if physical.is_valid:
+                items.append(
+                    ScreenTranslationItem(
+                        source_text=source_text,
+                        translated_text=translated_text,
+                        region=physical,
+                        confidence=self._group_confidence(group),
+                    )
                 )
-            )
-
-        if not items:
-            raise NoTextDetectedError("No valid translated regions could be positioned.")
-
-        self._logger.info(
-            "Full-screen translation completed provider=%s regions=%d capture=%.3fs "
-            "ocr=%.3fs translation=%.3fs",
-            provider_name,
-            len(items),
-            capture_seconds,
-            ocr_seconds,
-            translation_seconds,
-        )
 
         return FullScreenTranslationResult(
             items=items,

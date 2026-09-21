@@ -16,7 +16,7 @@ from src.exceptions import OperationCancelled, ScreenTranslatorError
 from src.ocr.paddle_ocr import PaddleOCREngine
 from src.overlay.overlay_manager import OverlayManager
 from src.services.translation_pipeline import (
-    FullScreenTranslationResult,
+    LiveRegionTranslationResult,
     TranslationPipeline,
     TranslationResult,
 )
@@ -26,6 +26,7 @@ from src.translation.deepl_translator import DeepLTranslator
 from src.translation.libretranslate_translator import LibreTranslateTranslator
 from src.translation.translation_service import TranslationService
 from src.ui.main_window import MainWindow
+from src.utils.geometry import Rect
 from src.utils.logger import setup_logging
 
 from .hotkey_manager import HotkeyError, HotkeyManager
@@ -58,6 +59,7 @@ class AppState(Enum):
     IDLE = "idle"
     SELECTING = "selecting"
     PROCESSING = "processing"
+    LIVE = "live"
     SHOWING_OVERLAY = "showing_overlay"
 
 
@@ -72,7 +74,7 @@ class _PipelineWorker(QRunnable):
         self,
         job_id: int,
         pipeline: TranslationPipeline,
-        region,
+        region: Rect,
         settings: AppSettings,
     ) -> None:
         super().__init__()
@@ -108,26 +110,32 @@ class _PipelineWorker(QRunnable):
         self.signals.finished.emit(self.job_id, result)
 
 
-class _FullScreenWorker(QRunnable):
+class _LiveRegionWorker(QRunnable):
     def __init__(
         self,
         job_id: int,
         pipeline: TranslationPipeline,
+        region: Rect,
         settings: AppSettings,
+        previous_signature: bytes | None,
     ) -> None:
         super().__init__()
         self.job_id = job_id
         self.pipeline = pipeline
+        self.region = region
         self.settings = settings
+        self.previous_signature = previous_signature
         self.signals = _WorkerSignals()
 
     @Slot()
     def run(self) -> None:
         try:
-            result = self.pipeline.translate_full_screen(
+            result = self.pipeline.translate_live_region(
+                region=self.region,
                 source_language=self.settings.source_language,
                 target_language=self.settings.target_language,
                 provider_name=self.settings.translation_provider,
+                previous_signature=self.previous_signature,
                 status_callback=lambda text: self.signals.status.emit(
                     self.job_id, text
                 ),
@@ -139,7 +147,7 @@ class _FullScreenWorker(QRunnable):
             return
         except Exception as exc:
             self.signals.error.emit(
-                self.job_id, f"Unexpected full-screen translation error: {exc}"
+                self.job_id, f"Unexpected live scan error: {exc}"
             )
             return
 
@@ -147,6 +155,8 @@ class _FullScreenWorker(QRunnable):
 
 
 class ScreenTranslatorApplication(QObject):
+    LIVE_SCAN_INTERVAL_MS = 700
+
     def __init__(self, debug: bool = False) -> None:
         enable_windows_dpi_awareness()
 
@@ -180,18 +190,27 @@ class ScreenTranslatorApplication(QObject):
         self.state = AppState.IDLE
         self._job_id = 0
         self._selector: RegionSelector | None = None
+        self._selection_mode = "single"
         self._quitting = False
+
+        self._live_region: Rect | None = None
+        self._live_frame_signature: bytes | None = None
+        self._live_worker_busy = False
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(self.LIVE_SCAN_INTERVAL_MS)
+        self._live_timer.timeout.connect(self._schedule_live_scan)
 
         self.window = MainWindow(self.settings)
         self.window.translate_requested.connect(self.start_selection)
-        self.window.full_screen_translate_requested.connect(
-            self.start_full_screen_translation
-        )
+        self.window.live_scan_requested.connect(self.start_live_scan_selection)
+        self.window.stop_live_scan_requested.connect(self.stop_live_scan)
         self.window.settings_saved.connect(self.apply_settings)
         self.window.install_argos_requested.connect(self.install_argos_model)
 
         self.tray = TrayManager(self.window)
         self.tray.translate_requested.connect(self.start_selection)
+        self.tray.live_scan_requested.connect(self.start_live_scan_selection)
+        self.tray.stop_live_scan_requested.connect(self.stop_live_scan)
         self.tray.open_requested.connect(self.show_main_window)
         self.tray.settings_requested.connect(self.show_main_window)
         self.tray.exit_requested.connect(self.quit)
@@ -206,6 +225,10 @@ class ScreenTranslatorApplication(QObject):
             self.window.hide()
         else:
             self.window.show()
+
+    @property
+    def live_scan_active(self) -> bool:
+        return self._live_region is not None and self._live_timer.isActive()
 
     def _configure_translation_providers(self) -> None:
         self.translation_service.register(self.argos)
@@ -277,21 +300,38 @@ class ScreenTranslatorApplication(QObject):
         )
         return True
 
+    def _dispose_selector(self) -> None:
+        selector = self._selector
+        self._selector = None
+        if selector is not None:
+            selector.close()
+            selector.deleteLater()
+
+    def _stop_live_internal(self, clear_overlay: bool = True) -> None:
+        self._live_timer.stop()
+        self._live_region = None
+        self._live_frame_signature = None
+        self._live_worker_busy = False
+        self.window.set_live_mode(False)
+        self.tray.set_live_mode(False)
+        if clear_overlay:
+            self.overlay_manager.close()
+
     def _cancel_current_activity(self) -> None:
         self._job_id += 1
         self.pipeline.cancel()
-        self.overlay_manager.close()
+        self._stop_live_internal(clear_overlay=True)
         self._dispose_selector()
 
-    @Slot()
-    def start_selection(self) -> None:
-        if not self._sync_current_ui_settings():
-            return
-
-        self._cancel_current_activity()
+    def _begin_selector(self, mode: str) -> None:
+        self._selection_mode = mode
         self.state = AppState.SELECTING
         self.window.set_processing(False)
-        self.window.set_status("Select a screen region")
+        self.window.set_status(
+            "Select one region to translate"
+            if mode == "single"
+            else "Select the reading area to keep translated"
+        )
 
         try:
             selector = RegionSelector()
@@ -306,37 +346,18 @@ class ScreenTranslatorApplication(QObject):
         selector.begin()
 
     @Slot()
-    def start_full_screen_translation(self) -> None:
+    def start_selection(self) -> None:
         if not self._sync_current_ui_settings():
             return
-
         self._cancel_current_activity()
-        self.pipeline.reset_cancelled()
-        self.state = AppState.PROCESSING
-        self.window.set_processing(True)
-        self.window.set_status("Preparing full-screen scan...")
+        self._begin_selector("single")
 
-        # Hide our own GUI before the screenshot so PaddleOCR does not detect
-        # and translate Screen Translator itself.
-        self.window.hide()
-
-        self._job_id += 1
-        job_id = self._job_id
-        QTimer.singleShot(220, lambda: self._launch_full_screen_worker(job_id))
-
-    def _launch_full_screen_worker(self, job_id: int) -> None:
-        if job_id != self._job_id or self._quitting:
+    @Slot()
+    def start_live_scan_selection(self) -> None:
+        if not self._sync_current_ui_settings():
             return
-
-        worker = _FullScreenWorker(
-            job_id=job_id,
-            pipeline=self.pipeline,
-            settings=self.settings,
-        )
-        worker.signals.status.connect(self._on_worker_status)
-        worker.signals.finished.connect(self._on_full_screen_finished)
-        worker.signals.error.connect(self._on_worker_error)
-        self.thread_pool.start(worker)
+        self._cancel_current_activity()
+        self._begin_selector("live")
 
     @Slot()
     def _on_selection_cancelled(self) -> None:
@@ -344,16 +365,15 @@ class ScreenTranslatorApplication(QObject):
         self.window.set_status("Ready")
         self._dispose_selector()
 
-    def _dispose_selector(self) -> None:
-        selector = self._selector
-        self._selector = None
-        if selector is not None:
-            selector.close()
-            selector.deleteLater()
-
     @Slot(object)
     def _on_region_selected(self, region: Any) -> None:
+        mode = self._selection_mode
         self._dispose_selector()
+
+        if mode == "live":
+            self._start_live_scan(region)
+            return
+
         self.pipeline.reset_cancelled()
         self.state = AppState.PROCESSING
         self.window.set_processing(True)
@@ -370,6 +390,123 @@ class ScreenTranslatorApplication(QObject):
         worker.signals.finished.connect(self._on_worker_finished)
         worker.signals.error.connect(self._on_worker_error)
         self.thread_pool.start(worker)
+
+    def _start_live_scan(self, region: Rect) -> None:
+        self.pipeline.reset_cancelled()
+        self._live_region = region
+        self._live_frame_signature = None
+        self._live_worker_busy = False
+        self.state = AppState.LIVE
+
+        self._job_id += 1
+
+        self.window.set_live_mode(True)
+        self.tray.set_live_mode(True)
+        self.window.set_status(
+            "Live scan active – scroll normally; translations update automatically"
+        )
+        self.show_main_window()
+
+        self.logger.info(
+            "Live scan started region=(%d,%d %dx%d) interval=%dms",
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+            self.LIVE_SCAN_INTERVAL_MS,
+        )
+
+        self._live_timer.start()
+        QTimer.singleShot(0, self._schedule_live_scan)
+
+    @Slot()
+    def _schedule_live_scan(self) -> None:
+        if (
+            not self.live_scan_active
+            or self._live_worker_busy
+            or self._quitting
+            or self._live_region is None
+        ):
+            return
+
+        self._live_worker_busy = True
+        job_id = self._job_id
+
+        worker = _LiveRegionWorker(
+            job_id=job_id,
+            pipeline=self.pipeline,
+            region=self._live_region,
+            settings=self.settings,
+            previous_signature=self._live_frame_signature,
+        )
+        worker.signals.status.connect(self._on_worker_status)
+        worker.signals.finished.connect(self._on_live_scan_finished)
+        worker.signals.error.connect(self._on_live_scan_error)
+        self.thread_pool.start(worker)
+
+    @Slot(int, object)
+    def _on_live_scan_finished(
+        self,
+        job_id: int,
+        result: LiveRegionTranslationResult,
+    ) -> None:
+        if job_id != self._job_id or not self.live_scan_active:
+            return
+
+        self._live_worker_busy = False
+        self._live_frame_signature = result.frame_signature
+
+        if not result.changed:
+            self.window.set_status(
+                "Live scan active – waiting for the reading area to change"
+            )
+            return
+
+        translations = [
+            (item.translated_text, item.region)
+            for item in result.items
+        ]
+
+        if translations or self.overlay_manager.is_visible:
+            self.overlay_manager.show_translations(
+                translations,
+                self.settings.overlay_opacity,
+            )
+
+        if translations:
+            self.window.set_status(
+                f"Live scan active – {len(translations)} translated regions"
+            )
+        else:
+            self.window.set_status(
+                "Live scan active – no text detected yet; keep scrolling"
+            )
+
+    @Slot(int, str)
+    def _on_live_scan_error(self, job_id: int, message: str) -> None:
+        if job_id != self._job_id:
+            return
+
+        self._live_worker_busy = False
+        self.logger.error("Live scan error: %s", message)
+        self._stop_live_internal(clear_overlay=True)
+        self.state = AppState.IDLE
+        self._handle_error(message)
+
+    @Slot()
+    def stop_live_scan(self) -> None:
+        if not self.live_scan_active and self._live_region is None:
+            self.window.set_live_mode(False)
+            self.tray.set_live_mode(False)
+            return
+
+        self._job_id += 1
+        self.pipeline.cancel()
+        self._stop_live_internal(clear_overlay=True)
+        self.state = AppState.IDLE
+        self.window.set_status("Live scan stopped")
+        self.show_main_window()
+        self.logger.info("Live scan stopped.")
 
     @Slot(int, str)
     def _on_worker_status(self, job_id: int, text: str) -> None:
@@ -393,30 +530,6 @@ class ScreenTranslatorApplication(QObject):
         self.overlay_manager.show_translation(
             result.translated_text,
             result.region,
-            self.settings.overlay_opacity,
-        )
-        self.state = AppState.SHOWING_OVERLAY
-
-    @Slot(int, object)
-    def _on_full_screen_finished(
-        self,
-        job_id: int,
-        result: FullScreenTranslationResult,
-    ) -> None:
-        if job_id != self._job_id:
-            return
-
-        self.window.set_processing(False)
-        self.window.set_status(
-            f"Translated {len(result.items)} screen regions"
-        )
-
-        translations = [
-            (item.translated_text, item.region)
-            for item in result.items
-        ]
-        self.overlay_manager.show_translations(
-            translations,
             self.settings.overlay_opacity,
         )
         self.state = AppState.SHOWING_OVERLAY
@@ -454,7 +567,11 @@ class ScreenTranslatorApplication(QObject):
             self._register_hotkey(settings.global_hotkey)
 
         self.window.settings_page.load(settings)
-        self.window.set_status("Settings saved")
+        self.window.set_status(
+            "Settings saved"
+            if not self.live_scan_active
+            else "Settings saved – live scan will use them on the next update"
+        )
         self.tray.notify("Screen Translator", "Settings saved.")
 
     @Slot(str, str)
@@ -516,6 +633,7 @@ class ScreenTranslatorApplication(QObject):
             return
         self._quitting = True
         self.logger.info("Shutting down Screen Translator.")
+        self._live_timer.stop()
         self._job_id += 1
         self.pipeline.cancel()
         self.overlay_manager.close()
