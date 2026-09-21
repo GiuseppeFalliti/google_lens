@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import ctypes
 from enum import Enum
-import logging
 import sys
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication
 
 from src.capture.mss_capture import MSSScreenCapture
@@ -16,7 +15,11 @@ from src.config.settings_manager import SettingsManager
 from src.exceptions import OperationCancelled, ScreenTranslatorError
 from src.ocr.paddle_ocr import PaddleOCREngine
 from src.overlay.overlay_manager import OverlayManager
-from src.services.translation_pipeline import TranslationPipeline, TranslationResult
+from src.services.translation_pipeline import (
+    FullScreenTranslationResult,
+    TranslationPipeline,
+    TranslationResult,
+)
 from src.translation.argos_translator import ArgosTranslator
 from src.translation.azure_translator import AzureTranslator
 from src.translation.deepl_translator import DeepLTranslator
@@ -105,6 +108,44 @@ class _PipelineWorker(QRunnable):
         self.signals.finished.emit(self.job_id, result)
 
 
+class _FullScreenWorker(QRunnable):
+    def __init__(
+        self,
+        job_id: int,
+        pipeline: TranslationPipeline,
+        settings: AppSettings,
+    ) -> None:
+        super().__init__()
+        self.job_id = job_id
+        self.pipeline = pipeline
+        self.settings = settings
+        self.signals = _WorkerSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = self.pipeline.translate_full_screen(
+                source_language=self.settings.source_language,
+                target_language=self.settings.target_language,
+                provider_name=self.settings.translation_provider,
+                status_callback=lambda text: self.signals.status.emit(
+                    self.job_id, text
+                ),
+            )
+        except OperationCancelled:
+            return
+        except ScreenTranslatorError as exc:
+            self.signals.error.emit(self.job_id, str(exc))
+            return
+        except Exception as exc:
+            self.signals.error.emit(
+                self.job_id, f"Unexpected full-screen translation error: {exc}"
+            )
+            return
+
+        self.signals.finished.emit(self.job_id, result)
+
+
 class ScreenTranslatorApplication(QObject):
     def __init__(self, debug: bool = False) -> None:
         enable_windows_dpi_awareness()
@@ -143,6 +184,9 @@ class ScreenTranslatorApplication(QObject):
 
         self.window = MainWindow(self.settings)
         self.window.translate_requested.connect(self.start_selection)
+        self.window.full_screen_translate_requested.connect(
+            self.start_full_screen_translation
+        )
         self.window.settings_saved.connect(self.apply_settings)
         self.window.install_argos_requested.connect(self.install_argos_model)
 
@@ -202,11 +246,6 @@ class ScreenTranslatorApplication(QObject):
         self.window.activateWindow()
 
     def _sync_current_ui_settings(self) -> bool:
-        """Apply the values currently visible in the GUI before translating.
-
-        This prevents a stale saved provider (for example Argos) from being
-        used when the user has selected Azure but has not clicked Save settings.
-        """
         try:
             current = self.window.settings_page.values()
         except ValueError as exc:
@@ -217,7 +256,6 @@ class ScreenTranslatorApplication(QObject):
             return True
 
         old_hotkey = self.settings.global_hotkey
-
         try:
             current = self.settings_manager.save(current)
         except ValueError as exc:
@@ -239,19 +277,18 @@ class ScreenTranslatorApplication(QObject):
         )
         return True
 
+    def _cancel_current_activity(self) -> None:
+        self._job_id += 1
+        self.pipeline.cancel()
+        self.overlay_manager.close()
+        self._dispose_selector()
+
     @Slot()
     def start_selection(self) -> None:
         if not self._sync_current_ui_settings():
             return
 
-        self._job_id += 1
-        self.pipeline.cancel()
-        self.overlay_manager.close()
-
-        if self._selector is not None:
-            self._selector.close()
-            self._selector.deleteLater()
-
+        self._cancel_current_activity()
         self.state = AppState.SELECTING
         self.window.set_processing(False)
         self.window.set_status("Select a screen region")
@@ -267,6 +304,39 @@ class ScreenTranslatorApplication(QObject):
         selector.region_selected.connect(self._on_region_selected)
         selector.cancelled.connect(self._on_selection_cancelled)
         selector.begin()
+
+    @Slot()
+    def start_full_screen_translation(self) -> None:
+        if not self._sync_current_ui_settings():
+            return
+
+        self._cancel_current_activity()
+        self.pipeline.reset_cancelled()
+        self.state = AppState.PROCESSING
+        self.window.set_processing(True)
+        self.window.set_status("Preparing full-screen scan...")
+
+        # Hide our own GUI before the screenshot so PaddleOCR does not detect
+        # and translate Screen Translator itself.
+        self.window.hide()
+
+        self._job_id += 1
+        job_id = self._job_id
+        QTimer.singleShot(220, lambda: self._launch_full_screen_worker(job_id))
+
+    def _launch_full_screen_worker(self, job_id: int) -> None:
+        if job_id != self._job_id or self._quitting:
+            return
+
+        worker = _FullScreenWorker(
+            job_id=job_id,
+            pipeline=self.pipeline,
+            settings=self.settings,
+        )
+        worker.signals.status.connect(self._on_worker_status)
+        worker.signals.finished.connect(self._on_full_screen_finished)
+        worker.signals.error.connect(self._on_worker_error)
+        self.thread_pool.start(worker)
 
     @Slot()
     def _on_selection_cancelled(self) -> None:
@@ -323,6 +393,30 @@ class ScreenTranslatorApplication(QObject):
         self.overlay_manager.show_translation(
             result.translated_text,
             result.region,
+            self.settings.overlay_opacity,
+        )
+        self.state = AppState.SHOWING_OVERLAY
+
+    @Slot(int, object)
+    def _on_full_screen_finished(
+        self,
+        job_id: int,
+        result: FullScreenTranslationResult,
+    ) -> None:
+        if job_id != self._job_id:
+            return
+
+        self.window.set_processing(False)
+        self.window.set_status(
+            f"Translated {len(result.items)} screen regions"
+        )
+
+        translations = [
+            (item.translated_text, item.region)
+            for item in result.items
+        ]
+        self.overlay_manager.show_translations(
+            translations,
             self.settings.overlay_opacity,
         )
         self.state = AppState.SHOWING_OVERLAY

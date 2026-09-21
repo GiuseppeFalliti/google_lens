@@ -20,6 +20,7 @@ from .status_widget import StatusWidget
 
 class MainWindow(QMainWindow):
     translate_requested = Signal()
+    full_screen_translate_requested = Signal()
     settings_saved = Signal(object)
     install_argos_requested = Signal(str, str)
 
@@ -28,7 +29,7 @@ class MainWindow(QMainWindow):
         self._allow_close = False
 
         self.setWindowTitle("Screen Translator")
-        self.resize(620, 560)
+        self.resize(680, 590)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -38,7 +39,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Select a screen region, extract its text locally, and translate it."
+            "Translate a selected region or scan the whole screen and place "
+            "translations over detected text."
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -49,15 +51,32 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.settings_page, 1)
 
-        actions = QHBoxLayout()
-        self.translate_button = QPushButton("Translate screen region")
-        self.translate_button.clicked.connect(self.translate_requested)
-        actions.addWidget(self.translate_button)
+        translate_actions = QHBoxLayout()
 
+        self.translate_button = QPushButton("Translate selected region")
+        self.translate_button.setToolTip(
+            "Select one rectangular area and translate it."
+        )
+        self.translate_button.clicked.connect(self.translate_requested)
+        translate_actions.addWidget(self.translate_button)
+
+        self.full_screen_button = QPushButton("Translate full screen")
+        self.full_screen_button.setToolTip(
+            "Scan the entire desktop and create translation boxes over detected text."
+        )
+        self.full_screen_button.clicked.connect(
+            self.full_screen_translate_requested
+        )
+        translate_actions.addWidget(self.full_screen_button)
+
+        layout.addLayout(translate_actions)
+
+        save_actions = QHBoxLayout()
+        save_actions.addStretch(1)
         self.save_button = QPushButton("Save settings")
         self.save_button.clicked.connect(self._save)
-        actions.addWidget(self.save_button)
-        layout.addLayout(actions)
+        save_actions.addWidget(self.save_button)
+        layout.addLayout(save_actions)
 
         self.status = StatusWidget()
         layout.addWidget(self.status)
@@ -77,6 +96,7 @@ class MainWindow(QMainWindow):
 
     def set_processing(self, processing: bool) -> None:
         self.translate_button.setEnabled(not processing)
+        self.full_screen_button.setEnabled(not processing)
 
     def show_error(self, message: str) -> None:
         QMessageBox.warning(self, "Screen Translator", message)

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from PySide6.QtWidgets import QWidget
+
 from src.utils.geometry import Rect
 
+from .multi_translation_overlay import MultiTranslationOverlay
 from .translation_overlay import TranslationOverlay
 
 
 class OverlayManager:
     def __init__(self) -> None:
-        self._overlay: TranslationOverlay | None = None
+        self._overlay: QWidget | None = None
 
     @property
     def is_visible(self) -> bool:
@@ -16,6 +19,20 @@ class OverlayManager:
     def show_translation(self, text: str, region: Rect, opacity: float) -> None:
         self.close()
         overlay = TranslationOverlay(text=text, region=region, opacity=opacity)
+        overlay.closed.connect(self._clear_if_current)
+        self._overlay = overlay
+        overlay.show_overlay()
+
+    def show_translations(
+        self,
+        translations: list[tuple[str, Rect]],
+        opacity: float,
+    ) -> None:
+        self.close()
+        overlay = MultiTranslationOverlay(
+            translations=translations,
+            opacity=opacity,
+        )
         overlay.closed.connect(self._clear_if_current)
         self._overlay = overlay
         overlay.show_overlay()

@@ -50,3 +50,37 @@ class TranslationService:
             raise TranslationError(
                 f"Unexpected error from translation provider '{provider_name}': {exc}"
             ) from exc
+
+    def translate_many(
+        self,
+        texts: list[str],
+        source_language: str,
+        target_language: str,
+        provider_name: str,
+    ) -> list[str]:
+        cleaned = [text.strip() for text in texts]
+        if not cleaned or any(not text for text in cleaned):
+            raise TranslationError("One or more text regions are empty.")
+
+        if source_language == target_language:
+            return cleaned
+
+        provider = self.get_provider(provider_name)
+        try:
+            translated = provider.translate_many(
+                cleaned,
+                source_language,
+                target_language,
+            )
+        except (TranslationConfigurationError, TranslationError):
+            raise
+        except Exception as exc:
+            raise TranslationError(
+                f"Unexpected error from translation provider '{provider_name}': {exc}"
+            ) from exc
+
+        if len(translated) != len(cleaned):
+            raise TranslationError(
+                f"Translation provider '{provider_name}' returned an invalid batch."
+            )
+        return translated
