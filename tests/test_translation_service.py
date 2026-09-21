@@ -29,3 +29,15 @@ def test_missing_provider():
 def test_same_language_returns_input_without_provider():
     service = TranslationService()
     assert service.translate(" hello ", "en", "en", "missing") == "hello"
+
+
+
+def test_translate_many_uses_provider_batch_interface():
+    service = TranslationService([FakeProvider()])
+    result = service.translate_many(
+        ["hello", "world"],
+        "en",
+        "it",
+        "fake",
+    )
+    assert result == ["en>it:hello", "en>it:world"]
