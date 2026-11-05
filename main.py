@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 
+from dotenv import load_dotenv
+
 from src.app.application import ScreenTranslatorApplication
 
 
@@ -13,6 +15,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    load_dotenv()
     application = ScreenTranslatorApplication(debug=args.debug)
     return application.run()
 

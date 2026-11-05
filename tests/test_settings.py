@@ -31,3 +31,18 @@ def test_settings_round_trip(tmp_path):
     assert actual.azure_api_key == "secret"
     assert actual.azure_region == "westeurope"
     assert actual.azure_endpoint == "https://api.cognitive.microsofttranslator.com"
+
+def test_gemini_settings_round_trip(tmp_path):
+    qsettings = QSettings(str(tmp_path / "gemini.ini"), QSettings.Format.IniFormat)
+    manager = SettingsManager(qsettings)
+    manager.save(
+        AppSettings(
+            translation_provider="gemini",
+            gemini_api_key="test-key",
+            gemini_model="gemini-3.5-flash-lite",
+        )
+    )
+    actual = manager.load()
+    assert actual.translation_provider == "gemini"
+    assert actual.gemini_api_key == "test-key"
+    assert actual.gemini_model == "gemini-3.5-flash-lite"
