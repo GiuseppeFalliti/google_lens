@@ -15,6 +15,7 @@ LANGUAGES: dict[str, str] = {
 PROVIDERS: dict[str, str] = {
     "Argos Translate": "argos",
     "Azure Translator": "azure",
+    "Gemini Flash-Lite": "gemini",
     "DeepL": "deepl",
     "LibreTranslate": "libretranslate",
 }
@@ -33,6 +34,9 @@ class AppSettings:
     azure_region: str = ""
     azure_endpoint: str = "https://api.cognitive.microsofttranslator.com"
 
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
+
     libretranslate_url: str = "http://localhost:5000"
     libretranslate_api_key: str = ""
     deepl_api_key: str = ""
@@ -49,12 +53,14 @@ class AppSettings:
             raise ValueError("Source and target languages are required.")
         if source == target:
             raise ValueError("Source and target languages must be different.")
-        if provider not in {"argos", "azure", "deepl", "libretranslate"}:
+        if provider not in {"argos", "azure", "gemini", "deepl", "libretranslate"}:
             raise ValueError(f"Unsupported translation provider: {provider}")
         if not 0.30 <= float(self.overlay_opacity) <= 1.0:
             raise ValueError("Overlay opacity must be between 0.30 and 1.0.")
         if not 0.0 <= float(self.ocr_min_confidence) <= 1.0:
             raise ValueError("OCR confidence must be between 0 and 1.")
+        if not self.gemini_model.strip():
+            raise ValueError("Gemini model is required.")
         if not hotkey:
             raise ValueError("Global hotkey is required.")
 
@@ -69,6 +75,8 @@ class AppSettings:
             azure_api_key=self.azure_api_key.strip(),
             azure_region=self.azure_region.strip(),
             azure_endpoint=self.azure_endpoint.strip().rstrip("/"),
+            gemini_api_key=self.gemini_api_key.strip(),
+            gemini_model=self.gemini_model.strip(),
             libretranslate_url=self.libretranslate_url.strip().rstrip("/"),
             deepl_api_url=self.deepl_api_url.strip(),
         )

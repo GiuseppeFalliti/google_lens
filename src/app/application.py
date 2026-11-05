@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 from enum import Enum
 import sys
 from typing import Any
@@ -23,6 +24,7 @@ from src.services.translation_pipeline import (
 from src.translation.argos_translator import ArgosTranslator
 from src.translation.azure_translator import AzureTranslator
 from src.translation.deepl_translator import DeepLTranslator
+from src.translation.gemini_translator import GeminiTranslator
 from src.translation.libretranslate_translator import LibreTranslateTranslator
 from src.translation.translation_service import TranslationService
 from src.ui.main_window import MainWindow
@@ -237,6 +239,12 @@ class ScreenTranslatorApplication(QObject):
                 api_key=self.settings.azure_api_key,
                 region=self.settings.azure_region,
                 endpoint=self.settings.azure_endpoint,
+            )
+        )
+        self.translation_service.register(
+            GeminiTranslator(
+                api_key=self.settings.gemini_api_key or os.environ.get("GEMINI_API_KEY", ""),
+                model=self.settings.gemini_model,
             )
         )
         self.translation_service.register(

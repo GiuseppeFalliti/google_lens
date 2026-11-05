@@ -50,6 +50,7 @@ class SettingsPage(QWidget):
         self.provider_stack = QStackedWidget()
         self.provider_stack.addWidget(self._create_argos_panel())
         self.provider_stack.addWidget(self._create_azure_panel())
+        self.provider_stack.addWidget(self._create_gemini_panel())
         self.provider_stack.addWidget(self._create_deepl_panel())
         self.provider_stack.addWidget(self._create_libre_panel())
         translation_form.addRow("Provider settings:", self.provider_stack)
@@ -124,6 +125,31 @@ class SettingsPage(QWidget):
         form.addRow("Endpoint:", self.azure_endpoint)
         return panel
 
+    def _create_gemini_panel(self) -> QWidget:
+        panel = QWidget()
+        form = QFormLayout(panel)
+        form.setContentsMargins(0, 0, 0, 0)
+
+        self.gemini_key = QLineEdit()
+        self.gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gemini_key.setPlaceholderText(
+            "Google AI Studio API key (or GEMINI_API_KEY environment variable)"
+        )
+        self.gemini_model = QComboBox()
+        self.gemini_model.addItem("Gemini 3.5 Flash-Lite", "gemini-3.5-flash-lite")
+        self.gemini_model.addItem("Gemini 3.1 Flash-Lite", "gemini-3.1-flash-lite")
+
+        hint = QLabel(
+            "Free tier limits apply. Only recognized text goes to Google. "
+            "Keys entered here are saved locally in Qt settings."
+        )
+        hint.setWordWrap(True)
+
+        form.addRow("API key:", self.gemini_key)
+        form.addRow("Model:", self.gemini_model)
+        form.addRow("", hint)
+        return panel
+
     def _create_deepl_panel(self) -> QWidget:
         panel = QWidget()
         form = QFormLayout(panel)
@@ -151,8 +177,9 @@ class SettingsPage(QWidget):
         index = {
             "argos": 0,
             "azure": 1,
-            "deepl": 2,
-            "libretranslate": 3,
+            "gemini": 2,
+            "deepl": 3,
+            "libretranslate": 4,
         }.get(code, 0)
         self.provider_stack.setCurrentIndex(index)
 
@@ -175,6 +202,9 @@ class SettingsPage(QWidget):
         self.azure_region.setText(settings.azure_region)
         self.azure_endpoint.setText(settings.azure_endpoint)
 
+        self.gemini_key.setText(settings.gemini_api_key)
+        self._set_combo_data(self.gemini_model, settings.gemini_model)
+
         self.libre_url.setText(settings.libretranslate_url)
         self.libre_key.setText(settings.libretranslate_api_key)
         self.deepl_key.setText(settings.deepl_api_key)
@@ -193,6 +223,9 @@ class SettingsPage(QWidget):
             azure_api_key=self.azure_key.text(),
             azure_region=self.azure_region.text(),
             azure_endpoint=self.azure_endpoint.text(),
+
+            gemini_api_key=self.gemini_key.text(),
+            gemini_model=str(self.gemini_model.currentData()),
 
             libretranslate_url=self.libre_url.text(),
             libretranslate_api_key=self.libre_key.text(),

@@ -435,9 +435,15 @@ class TranslationPipeline:
         target_language: str,
         provider_name: str,
     ) -> tuple[list[str], int]:
+        # Distinguish models within a provider so switching Flash-Lite versions
+        # never reuses a translation from the previous model.
+        provider = self._translations.get_provider(provider_name)
+        cache_provider_id = (
+            f"{provider_name.lower()}:{getattr(provider, 'model', '')}"
+        )
         keys = [
             (
-                provider_name.lower(),
+                cache_provider_id,
                 source_language.lower(),
                 target_language.lower(),
                 text,

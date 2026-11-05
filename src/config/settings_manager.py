@@ -44,6 +44,10 @@ class SettingsManager:
             azure_endpoint=str(
                 self._settings.value("azure/endpoint", defaults.azure_endpoint)
             ),
+            gemini_api_key=str(self._settings.value("gemini/api_key", "")),
+            gemini_model=str(
+                self._settings.value("gemini/model", defaults.gemini_model)
+            ),
             libretranslate_url=str(
                 self._settings.value(
                     "libretranslate/base_url", defaults.libretranslate_url
@@ -80,6 +84,8 @@ class SettingsManager:
         self._settings.setValue("azure/region", settings.azure_region)
         self._settings.setValue("azure/endpoint", settings.azure_endpoint)
 
+        self._settings.setValue("gemini/api_key", settings.gemini_api_key)
+        self._settings.setValue("gemini/model", settings.gemini_model)
         self._settings.setValue("libretranslate/base_url", settings.libretranslate_url)
         self._settings.setValue(
             "libretranslate/api_key", settings.libretranslate_api_key
