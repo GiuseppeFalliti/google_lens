@@ -2233,3 +2233,37 @@ bassa latenza
 ```
 
 e soprattutto un primo flusso end-to-end realmente funzionante.
+
+
+---
+
+## Gemini Flash-Lite — provider online gratuito
+
+La GUI include il provider **Gemini Flash-Lite**. Per nuovi progetti il modello
+predefinito e' **gemini-3.5-flash-lite**; puoi scegliere anche
+**gemini-3.1-flash-lite** nelle impostazioni se disponibile nel tuo account.
+
+1. Crea una chiave sul sito https://aistudio.google.com/api-keys usando un
+   progetto nel livello gratuito, senza collegare un account di fatturazione.
+2. Avvia Screen Translator e imposta From: English, To: Italian.
+3. Seleziona Provider: Gemini Flash-Lite.
+4. Incolla la API key e scegli il modello, poi salva.
+5. Usa Translate selected region oppure Start live scan area.
+
+In alternativa, lascia vuota la chiave nella GUI e usa la variabile ambiente
+GEMINI_API_KEY (puoi metterla in un file .env locale, escluso da Git).
+Il programma usa la REST API Google GenerateContent e, in modalita' Live Scan,
+invia piu' testi OCR numerati in **una richiesta per batch**, poi associa
+ogni traduzione al riquadro giusto.
+
+**Privacy e sicurezza:** gli screenshot rimangono locali; solo il testo
+riconosciuto viene mandato a Google. Nel livello gratuito Google puo' utilizzare
+i contenuti per migliorare i propri servizi, quindi non usare questa modalita'
+su informazioni riservate. Le chiavi immesse nella GUI sono salvate tramite
+Qt QSettings, non in un archivio crittografato: per maggiore sicurezza usa
+GEMINI_API_KEY nell'ambiente.
+
+**Limiti gratuiti:** quote per modello/progetto su
+https://aistudio.google.com/usage ; un errore HTTP 429 significa che
+hai esaurito una quota o un limite di frequenza. Se vuoi evitare
+addebiti, non collegare un account di fatturazione al progetto API.
